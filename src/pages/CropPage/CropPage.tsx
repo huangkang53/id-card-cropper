@@ -12,11 +12,10 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { cn } from '@/lib/utils';
-import { cropOne, getCard, originalUrl, setCorners } from '@/lib/api';
-import { detectCardCorners } from '@/lib/detect';
+import { cropOne, getCard, listCards, originalUrl, setCorners, autodetect } from '@/lib/api';
 import { warpToCanvas } from '@/lib/warp';
 import type { ICardRecord, Point2D } from '@/lib/types';
-import { Check, ChevronLeft, RefreshCw, RotateCw, Save, Scan } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, RefreshCw, RotateCw, Save, Scan } from 'lucide-react';
 import CornerEditor from './sections/CornerEditor';
 import PreviewPanel from './sections/PreviewPanel';
 
@@ -30,19 +29,16 @@ function defaultCorners(w: number, h: number): Point2D[] {
   ];
 }
 
-/** 旋转后的有效尺寸（90/270 时宽高互换） */
 function effectiveSize(ow: number, oh: number, rotation: number) {
   return rotation % 180 === 0 ? { w: ow, h: oh } : { w: oh, h: ow };
 }
 
-/** 把四角坐标顺时针转 90°：原图 ow×oh → 新图 oh×ow */
 function rotateCornersOnce(corners: Point2D[], ow: number, oh: number): Point2D[] {
   const t = (p: Point2D) => ({ x: oh - p.y, y: p.x });
   const [tl, tr, br, bl] = corners;
   return [t(bl), t(tl), t(tr), t(br)];
 }
 
-/** 按 rotation（0/90/180/270 顺时针）把原图绘到离屏画布上，供编辑器显示与预览 */
 function buildWorkCanvas(bitmap: ImageBitmap, rotation: number, maxDim = 1000) {
   const ow = bitmap.width;
   const oh = bitmap.height;
@@ -77,14 +73,8 @@ function computePreview(
     outW = 480;
     outH = 303;
   } else {
-    const bbW = Math.max(
-      10,
-      (Math.abs(corners[1].x - corners[0].x) + Math.abs(corners[2].x - corners[3].x)) / 2,
-    );
-    const bbH = Math.max(
-      10,
-      (Math.abs(corners[3].y - corners[0].y) + Math.abs(corners[2].y - corners[1].y)) / 2,
-    );
+    const bbW = Math.max(10, (Math.abs(corners[1].x - corners[0].x) + Math.abs(corners[2].x - corners[3].x)) / 2);
+    const bbH = Math.max(10, (Math.abs(corners[3].y - corners[0].y) + Math.abs(corners[2].y - corners[1].y)) / 2);
     outW = 480;
     outH = Math.round((480 * bbH) / bbW);
   }
@@ -113,8 +103,10 @@ export default function CropPage() {
   const [rotation, setRotation] = useState(0);
   const [effSize, setEffSize] = useState({ w: 0, h: 0 });
   const [editorImage, setEditorImage] = useState('');
+  const [navIds, setNavIds] = useState<string[]>([]);
   const bitmapRef = useRef<ImageBitmap | null>(null);
 
+  // 加载当前记录
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -131,36 +123,41 @@ export default function CropPage() {
         setCorners2State(rec.corners2 || null);
         const blob = await fetch(originalUrl(id)).then((res) => res.blob());
         const bitmap = await createImageBitmap(blob);
-        if (cancelled) {
-          bitmap.close();
-          return;
-        }
+        if (cancelled) { bitmap.close(); return; }
         bitmapRef.current = bitmap;
         const built = buildWorkCanvas(bitmap, rot);
         setWorkCanvas(built.canvas);
         setWorkSize({ w: built.w, h: built.h });
         setEditorImage(built.canvas.toDataURL('image/jpeg', 0.92));
-      } catch (err) {
-        if (!cancelled) {
-          setNotFound(true);
-        }
+      } catch {
+        if (!cancelled) setNotFound(true);
       }
     }
     load();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [id]);
 
+  // 加载列表用于上一张/下一张
+  useEffect(() => {
+    listCards({ limit: 1000 }).then((r: any) => {
+      setNavIds((r.items || []).map((x: any) => x.id));
+    }).catch(() => {});
+  }, [id]);
+
+  // 预览：加 side 到依赖
   useEffect(() => {
     if (!record || !workCanvas || !workSize || !corners) return;
     const t = setTimeout(() => {
       setPreviewDataUrl(
         computePreview(workCanvas, workSize, effSize.w, effSize.h, side === 1 ? corners : corners2 || corners, ratio),
       );
-    }, 300);
+    }, 150);
     return () => clearTimeout(t);
-  }, [record, workCanvas, workSize, corners, ratio, effSize]);
+  }, [record, workCanvas, workSize, corners, corners2, side, ratio, effSize]);
+
+  const navIdx = navIds.indexOf(id);
+  const prevId = navIdx > 0 ? navIds[navIdx - 1] : null;
+  const nextId = navIdx >= 0 && navIdx < navIds.length - 1 ? navIds[navIdx + 1] : null;
 
   if (notFound) {
     return (
@@ -188,37 +185,40 @@ export default function CropPage() {
     const bbH = Math.max(10, (Math.abs(corners[3].y - corners[0].y) + Math.abs(corners[2].y - corners[1].y)) / 2);
     return Math.max(200, Math.min(1200, Math.round((1011 * bbH) / bbW)));
   })();
-  const outLabel =
-    ratio === 'id'
-      ? '1011 × 638（身份证标准 85.6×54mm @300dpi）'
-      : `约 1011 × ${freeOutH}（随四角比例）`;
+  const outLabel = ratio === 'id'
+    ? '1011 × 638（身份证标准 85.6×54mm @300dpi）'
+    : `约 1011 × ${freeOutH}（随四角比例）`;
 
   const handleDetect = async () => {
     setDetecting(true);
     try {
-      const blob = await fetch(originalUrl(id)).then((res) => res.blob());
-      const result = await detectCardCorners(blob);
-      // 自动识别基于未旋转原图；当前有旋转时把坐标变换到当前朝向
-      let detected = result.corners;
+      const result = await autodetect(id);
+      if (!result.cards.length) {
+        toast('未识别出身份证，请手动调整四角');
+        return;
+      }
+      let detected = result.cards[0].corners;
       if (rotation) {
-        let ow = record.width;
-        let oh = record.height;
+        let ow = result.origW, oh = result.origH;
         for (let i = 0; i < rotation / 90; i++) {
           detected = rotateCornersOnce(detected, ow, oh);
           [ow, oh] = [oh, ow];
         }
       }
       setCornersState(detected);
-      if (result.corners2) {
-        let d2 = result.corners2;
+      if (result.cards.length >= 2) {
+        let d2 = result.cards[1].corners;
         if (rotation) {
-          let ow2 = record.width, oh2 = record.height;
+          let ow2 = result.origW, oh2 = result.origH;
           for (let i = 0; i < rotation / 90; i++) { d2 = rotateCornersOnce(d2, ow2, oh2); [ow2, oh2] = [oh2, ow2]; }
         }
         setCorners2State(d2);
+      } else {
+        setCorners2State(null);
       }
-      toast(result.confident ? '已自动识别四角，可再微调' : '自动识别不够可靠，已用默认框，请手动调整四角');
-    } catch (err) {
+      toast(result.cards.length >= 2 ? `检测到 ${result.cards.length} 张身份证，可再微调` : '已自动识别四角，可再微调');
+    } catch (err: any) {
+      toast(err?.message || '识别失败，请手动调整');
     } finally {
       setDetecting(false);
     }
@@ -229,7 +229,6 @@ export default function CropPage() {
     if (!bitmap || !record || !corners) return;
     const newRot = (rotation + 90) % 360;
     const oldEff = effectiveSize(record.width, record.height, rotation);
-    // 四角跟随画面一起顺时针转 90°
     setCornersState(rotateCornersOnce(corners, oldEff.w, oldEff.h));
     setRotation(newRot);
     const newEff = effectiveSize(record.width, record.height, newRot);
@@ -241,7 +240,6 @@ export default function CropPage() {
   };
 
   const handleSave = () => {
-    // 立即跳转放最前面，不被任何异步/错误阻断
     window.location.href = '/';
     setSaving(true);
     toast.success('已保存，到列表页点「覆盖原文件」写回');
@@ -249,13 +247,22 @@ export default function CropPage() {
     try { cropOne(id).catch(() => {}); } catch {}
   };
 
+  const goPrev = () => { if (prevId) navigate(`/crop/${prevId}`); };
+  const goNext = () => { if (nextId) navigate(`/crop/${nextId}`); };
+
   return (
     <div className="mx-auto flex h-screen w-full flex-col px-4 py-4 sm:px-6">
       <header className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-2">
           <Button variant="ghost" size="sm" onClick={() => navigate('/')}>
             <ChevronLeft className="mr-1 h-4 w-4" />
             返回列表
+          </Button>
+          <Button variant="outline" size="sm" onClick={goPrev} disabled={!prevId} title="上一张">
+            <ChevronLeft className="h-4 w-4" />
+          </Button>
+          <Button variant="outline" size="sm" onClick={goNext} disabled={!nextId} title="下一张">
+            <ChevronRight className="h-4 w-4" />
           </Button>
           <h1 className="truncate text-lg font-semibold" title={record.name}>
             {record.name}
@@ -279,10 +286,7 @@ export default function CropPage() {
             <RotateCw className="mr-1 h-4 w-4" />
             旋转90°
           </Button>
-          <Button
-            variant="outline"
-            onClick={() => setCornersState(defaultCorners(effSize.w, effSize.h))}
-          >
+          <Button variant="outline" onClick={() => setCornersState(defaultCorners(effSize.w, effSize.h))}>
             <RefreshCw className="mr-1 h-4 w-4" />
             重置
           </Button>
@@ -327,4 +331,3 @@ export default function CropPage() {
     </div>
   );
 }
-

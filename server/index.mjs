@@ -11,6 +11,7 @@ import {
   readSource, writeCropBack, writeCrop2, readCropCache, readCrop2Cache, commitCrop,
 } from './storage.mjs';
 import { warpPerspective, ID_CARD_WIDTH, ID_CARD_HEIGHT } from './warp.mjs';
+import { detectCorners } from './detect.mjs';
 
 const PORT = Number(process.env.PORT || 38421);
 const app = express();
@@ -58,7 +59,7 @@ $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
 $dlg.Description = '选择身份证照片文件夹'
 if ($dlg.ShowDialog() -eq 'OK') { Write-Output $dlg.SelectedPath }
 `;
-  execFile('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-STA','-Command',ps], { timeout: 120000, windowsHide: false }, (err, stdout) => {
+  execFile('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-STA','-Command',ps], { timeout: 120000, windowsHide: true }, (err, stdout) => {
     if (err) { res.status(500).json({ error: '取消' }); return; }
     const dir = (stdout||'').replace(/^\uFEFF/,'').trim();
     if (!dir) { res.status(400).json({ error: '未选择' }); return; }
@@ -90,7 +91,7 @@ if ($dlg.ShowDialog() -eq 'OK') {
   $dlg.FileNames | ForEach-Object { Write-Output $_ }
 }
 `;
-  execFile('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-STA','-Command',script], { timeout: 120000, windowsHide: false }, (err, stdout) => {
+  execFile('powershell.exe', ['-NoProfile','-ExecutionPolicy','Bypass','-STA','-Command',script], { timeout: 120000, windowsHide: true }, (err, stdout) => {
     if (err) { res.status(500).json({ error: '取消' }); return; }
     const files = (stdout||'').replace(/^\uFEFF/,'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
     res.json({ files });
@@ -190,6 +191,24 @@ app.post(`${PHOTO_BASE}/batch/crop`, async (req, res) => {
   res.json({ ok, failed });
 });
 
+// AI 自动检测四角
+app.post(`${PHOTO_BASE}/:id/autodetect`, async (req, res) => {
+  try {
+    const rec = getRecord(req.params.id);
+    if (!rec) { res.status(404).json({ error: '照片不存在' }); return; }
+    const result = await detectCorners(rec.absPath);
+    // 保存检测结果
+    if (result.cards.length >= 1) rec.corners = result.cards[0].corners;
+    if (result.cards.length >= 2) rec.corners2 = result.cards[1].corners;
+    rec.updatedAt = Date.now();
+    upsertRecord(rec);
+    res.json({ cards: result.cards, origW: result.origW, origH: result.origH });
+  } catch (e) {
+    console.error('[autodetect]', e);
+    res.status(500).json({ error: e.message || String(e) });
+  }
+});
+
 app.patch(`${PHOTO_BASE}/batch/quality`, (req, res) => {
   const ids = Array.isArray(req.body?.ids) ? req.body.ids : [];
   const updated = [];
@@ -204,9 +223,21 @@ app.delete(`${PHOTO_BASE}/batch`, (req, res) => {
   res.json({ removed });
 });
 
-app.get(`${PHOTO_BASE}/:id`, (req, res) => {
+app.get(`${PHOTO_BASE}/:id`, async (req, res) => {
   const rec = getRecord(req.params.id);
   if (!rec) { res.status(404).json({ error: '不存在' }); return; }
+  // 每次加载都重新读取实际文件尺寸，防止覆盖原文件后记录过期导致拉伸
+  try {
+    const meta = await sharp(rec.absPath).metadata();
+    if (meta.width && meta.height && (rec.width !== meta.width || rec.height !== meta.height)) {
+      rec.width = meta.width;
+      rec.height = meta.height;
+      rec.corners = null;
+      rec.corners2 = null;
+      rec.rotation = 0;
+      upsertRecord(rec);
+    }
+  } catch {}
   res.json(toPublic(rec));
 });
 
@@ -255,12 +286,25 @@ app.get(`${PHOTO_BASE}/:id/crop-image`, (req, res) => {
   res.sendFile(cp);
 });
 
-app.post(`${PHOTO_BASE}/commit`, (req, res) => {
+app.post(`${PHOTO_BASE}/commit`, async (req, res) => {
   const ids = req.body?.ids;
   const list = listRecords().filter((r) => r.hasCrop && (!ids || ids.includes(r.id)));
   let ok = 0, failed = 0;
   for (const rec of list) {
-    try { commitCrop(rec); ok++; } catch { failed++; }
+    try {
+      commitCrop(rec);
+      try {
+        const info = await sharp(rec.absPath).metadata();
+        rec.width = info.width || 0;
+        rec.height = info.height || 0;
+        rec.corners = null;
+        rec.corners2 = null;
+        rec.rotation = 0;
+        rec.updatedAt = Date.now();
+        upsertRecord(rec);
+      } catch {}
+      ok++;
+    } catch { failed++; }
   }
   res.json({ ok, failed });
 });

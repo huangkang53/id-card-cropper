@@ -5,3 +5,10 @@ src-tauri/resources/node/
 .env
 *.log
 server/data/
+
+server/cache/
+server/data/
+server/idcorner.onnx
+debug_input.jpg
+detect.log
+detect_err.log

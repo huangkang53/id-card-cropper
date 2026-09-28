@@ -9,7 +9,7 @@ app.get('/openapi/pick-folder', (_req, res) => {
     "$dlg.Description = '选择身份证照片所在的文件夹（裁剪结果将按原文件名覆盖写回此目录）'",
     "if ($dlg.ShowDialog() -eq 'OK') { Write-Output $dlg.SelectedPath }"
   ].join('; ');
-  execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 120000 }, (err, stdout) => {
+  execFile('powershell.exe', ['-NoProfile', '-STA', '-Command', ps], { timeout: 120000, windowsHide: true }, (err, stdout) => {
     if (err) { res.status(500).json({ error: '取消或选择失败' }); return; }
     const dir = (stdout || '').trim();
     if (!dir) { res.status(400).json({ error: '未选择文件夹' }); return; }

@@ -121,6 +121,16 @@ export async function batchCrop(ids: string[]): Promise<{ ok: ICardRecord[]; fai
   });
 }
 
+export interface AutoDetectResult {
+  cards: { prob: number; corners: Point2D[] }[];
+  origW: number;
+  origH: number;
+}
+
+export async function autodetect(id: string): Promise<AutoDetectResult> {
+  return req(`${BASE}/${id}/autodetect`, { method: 'POST' });
+}
+
 export async function setQuality(id: string, quality: Quality): Promise<ICardRecord> {
   return req(`${BASE}/${id}/quality`, {
     method: 'PATCH',

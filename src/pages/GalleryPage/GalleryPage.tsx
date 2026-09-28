@@ -6,11 +6,10 @@ import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 import {
-  batchCrop, batchQuality, commitCrops, cropOne, downloadUrl, exportUrl,
-  getStats, listCards, openFolder, originalUrl, pickFiles, pickFolder,
+  autodetect, batchCrop, batchQuality, commitCrops, cropOne, downloadUrl, exportUrl,
+  getStats, listCards, openFolder, pickFiles, pickFolder,
   removeCards, scanFiles, scanFolder, setCorners,
 } from '@/lib/api';
-import { detectCardCorners } from '@/lib/detect';
 import type { ICardRecord, IStats } from '@/lib/types';
 import type { IListParams } from '@/lib/api';
 import { ArrowUpDown, Download, FolderOpen, FolderOutput, FolderSearch, Scan, Search, Save, Upload } from 'lucide-react';
@@ -212,12 +211,12 @@ export default function GalleryPage() {
       const r = targets[i];
       setAutoProgress(`自动识别并裁剪 ${i + 1}/${targets.length}：${r.name}`);
       try {
-        const blob = await fetch(originalUrl(r.id)).then((res) => res.blob());
-        const result = await detectCardCorners(blob);
-        await setCorners(r.id, result.corners);
+        const result = await autodetect(r.id);
+        if (result.cards.length === 0) { failed.push(r.name); continue; }
+        await setCorners(r.id, result.cards[0].corners, 0, result.cards[1]?.corners || null);
         await cropOne(r.id);
         ok++;
-        if (result.confident) confident++;
+        if (result.cards.length >= 2) confident++;
       } catch {
         failed.push(r.name);
       }
